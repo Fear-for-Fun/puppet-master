@@ -7,6 +7,8 @@ Puppet Master is a simple front-end module that allows objects (`puppet`) to smo
 - Have AI models replicated on the client as a `puppet` that follows the server's `master` part
 - Shoot a magic projectile straight forwards and have a puppet make a wavy trail behind it
 
+<img width="540" height="540" alt="puppetMasterIcon" src="https://github.com/user-attachments/assets/0bd8cda5-40fe-4b62-a104-e8ca6a240636" />
+
 ## Usage
 To construct a PuppetMaster class, you'll need a `master: Model | BasePart` a `puppet: Model | BasePart` and optionally settings `settings: Settings`
 
