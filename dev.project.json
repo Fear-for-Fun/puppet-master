@@ -1,0 +1,28 @@
+{
+    "name": "puppet-master",
+    "servePlaceIds": [
+        76160840504577
+    ],
+    "tree": {
+        "$className": "DataModel",
+        "ReplicatedStorage": {
+            "Packages": {
+                "$className": "Folder",
+                "PuppetMaster": {
+                    "$path": "src"
+                }
+            },
+            "client": {
+                "$className": "Folder",
+                "$path": "testing/client"
+            },
+            "Assets": {
+                "$ignoreUnknownInstances": true,
+                "$className": "Folder"
+            }
+        },
+        "ServerScriptService": {
+            "$path": "testing/server"
+        }
+    }
+}
