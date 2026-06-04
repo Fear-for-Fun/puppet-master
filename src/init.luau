@@ -41,6 +41,8 @@ export type Settings = {
 	debug: {
 		debugTrails: boolean?,
 	}?,
+
+	destroyObjectWhenParentSetsToNil: boolean?,
 }
 
 export type PuppetMaster = typeof(setmetatable(
@@ -53,7 +55,7 @@ export type PuppetMaster = typeof(setmetatable(
 
 		lookVectorClamping: Vector2,
 
-		focusTarget: Instance,
+		focusTarget: Instance?,
 
 		style: StyleModules | any?, -- what style the puppet follows the master in (use PuppetMaster.StyleModules in the settings)
 		turnSpeed: number, -- gets / 100 and used as the alpha during lookVector interpolation
@@ -70,7 +72,11 @@ export type PuppetMaster = typeof(setmetatable(
 			debugInstances: { Instance },
 		}?,
 
+		destroyObjectWhenParentSetsToNil: boolean,
+
 		runTimeConnection: RBXScriptConnection,
+		destroyConnections: { RBXScriptConnection },
+		focusTargetDestroyConnection: RBXScriptConnection,
 	},
 	PuppetMaster
 ))
@@ -148,6 +154,20 @@ function PuppetMaster.new(master: Instance, puppet: Instance, settings: Settings
 		(self :: any):_createDebugTrail(puppet, Color3.fromRGB(255, 0, 0))
 	end
 
+	self.destroyObjectWhenParentSetsToNil = settings and settings.destroyObjectWhenParentSetsToNil or true
+
+	self.destroyConnections = {}
+	self.destroyConnections[#self.destroyConnections + 1] = master.AncestryChanged:Connect(function()
+		if not master or not master.Parent and self.destroyObjectWhenParentSetsToNil then
+			self:Destroy()
+		end
+	end)
+	self.destroyConnections[#self.destroyConnections + 1] = puppet.AncestryChanged:Connect(function()
+		if not puppet or not puppet.Parent and self.destroyObjectWhenParentSetsToNil then
+			self:Destroy()
+		end
+	end)
+
 	return self
 end
 
@@ -216,6 +236,17 @@ end
 
 function PuppetMaster.AddFocusTarget(self: PuppetMaster, target: BasePart | Model)
 	self.focusTarget = target
+
+	self.focusTargetDestroyConnection = (self.focusTarget :: Instance).AncestryChanged:Connect(function()
+		if not self.focusTarget or not self.focusTarget.Parent and self.destroyObjectWhenParentSetsToNil then
+			self:RemoveFocusTarget()
+		end
+	end)
+end
+
+function PuppetMaster.RemoveFocusTarget(self: PuppetMaster)
+	self.focusTargetDestroyConnection:Disconnect()
+	self.focusTarget = nil
 end
 
 function PuppetMaster.AddOffset(
@@ -290,6 +321,7 @@ end
 
 function PuppetMaster.Destroy(self: PuppetMaster)
 	self:Pause()
+	self:RemoveFocusTarget()
 
 	for _, data in self.offsetObjects do
 		local obj = data.Obj
@@ -298,6 +330,10 @@ function PuppetMaster.Destroy(self: PuppetMaster)
 		end
 
 		obj:Destroy()
+	end
+
+	for _, connection in self.destroyConnections do
+		connection:Disconnect()
 	end
 
 	table.clear(self :: any)
@@ -359,8 +395,10 @@ function PuppetMaster._setInstanceCFrame(_: PuppetMaster, instance: any, cframe:
 
 	if isModel and instance.PrimaryPart then
 		instance.PrimaryPart.CFrame = cframe
+		return
 	elseif isModel then
 		instance:PivotTo(cframe)
+		return
 	end
 
 	instance.CFrame = cframe
@@ -410,6 +448,8 @@ function PuppetMaster._createDebugTrail(self: PuppetMaster, instance: Instance, 
 	attachment1.Parent = attachmentParent
 
 	local trail = TRAIL:Clone()
+	trail.Attachment0 = attachment0
+	trail.Attachment1 = attachment1
 	trail.Color = ColorSequence.new(color)
 	trail.Parent = attachmentParent
 
