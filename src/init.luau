@@ -51,19 +51,9 @@ export type PuppetMaster = typeof(setmetatable(
 		offsetObjects: { { Obj: Vector3Value, Priority: number } },
 		offsetTweenConnections: { [Vector3Value]: RBXScriptConnection },
 
-		--[[
-			-- lookVectorClamping: Vector2 --
-			numbers range from 0 to 1.
-			1 - looks fully to focusTarget
-			0.5 - can look 180 degrees forward from where master is looking
-			0 - looks fully where master is looking
-
-			X - applies to horizontal axis
-			Y - applies to vertical axis
-		]]
 		lookVectorClamping: Vector2,
 
-		focusTarget: Instance, -- puppet will look at this instance, when nil puppet follows the masters lookDir
+		focusTarget: Instance,
 
 		style: StyleModules | any?, -- what style the puppet follows the master in (use PuppetMaster.StyleModules in the settings)
 		turnSpeed: number, -- gets / 100 and used as the alpha during lookVector interpolation
@@ -71,7 +61,7 @@ export type PuppetMaster = typeof(setmetatable(
 		snapThreshold: number, -- the maximum distance before the puppet copies the master's position instead of interpolating
 
 		-- // specific variables for styles
-		springSpeed: number, -- used for Spring style only, affects the frequency of waves
+		springSpeed: number, -- affects the frequency of waves
 		springFadeIn: number, -- level of gradual decline of spring strength when close to master
 		springStrength: number, -- maximum vertex
 
@@ -88,22 +78,42 @@ export type PuppetMaster = typeof(setmetatable(
 --[=[
 	```lua
 	local PuppetMaster = PuppetMaster.new(masterPart, puppetPart, {
-		style = PuppetMaster.StyleModules.Linear,
-		turnSpeed = 20,
-		lerpSpeed = 5,
-		lookVectorClamping = Vector2.new(1, 0.2),
-		snapThreshold = 0.01,
+		style = PuppetMaster.StyleModules.Linear, -- what style the puppet follows the master in (use PuppetMaster.StyleModules in the settings)
+		turnSpeed = 20, -- gets / 100 and used as the alpha during lookVector interpolation
+		lerpSpeed = 5, -- gets / 100 and used as the alpha during poosition interpolation
+		snapThreshold = 0.01, -- the maximum distance before the puppet copies the master's position instead of interpolating
+		
+		--[[
+			-- lookVectorClamping: Vector2 --
+			numbers range from 0 to 1.
+			1 - looks fully to focusTarget
+			0.5 - can look 180 degrees forward from where master is looking
+			0 - looks fully where master is looking
 
+			X - applies to horizontal axis
+			Y - applies to vertical axis
+		]]
+		lookVectorClamping = Vector2.new(1, 0.2),
+
+		-- // specific variables for styles
 		springSettings = {
-			speed = 15,
-			fadeIn = 4,
-			strength = 1,
+			speed = 15, -- affects the frequency of waves
+			fadeIn = 4, -- level of gradual decline of spring strength when close to master
+			strength = 1, -- maximum vertex
 		},
 
 		debug = {
 			debugTrails = false,
 		},
 	})
+
+	-- puppet will look at this instance, when nil puppet follows the masters lookDir
+	PuppetMaster:AddFocusTarget(workspace:WaitForChild("FocusTarget"))
+	
+	-- puppet will be offset by 4 studs above the master, function retruns Vector3Value
+	local idleOffset = testPuppet:AddOffset(Vector3.yAxis * 4, 1, false)
+
+	PuppetMaster:Play(RunService.Heartbeat)
 	```
 ]=]
 function PuppetMaster.new(master: Instance, puppet: Instance, settings: Settings?): PuppetMaster
