@@ -1,0 +1,6 @@
+{
+  "name": "puppet-master",
+  "tree": {
+    "$path": "src"
+  }
+}

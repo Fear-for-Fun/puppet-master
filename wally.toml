@@ -1,0 +1,10 @@
+[package]
+name = "1legendrblx/puppet-master"
+authors = ["Legend <noahross06@gmail.com>"]
+description = "Front-end module that allows you to use simple parts to dynamically control complex parts and models."
+version = "1.0.0"
+license = "MIT"
+exclude = ["**"]
+include = ["src", "src/**", "wally.toml", "wally.lock", "default.project.json", "README.md"]
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"

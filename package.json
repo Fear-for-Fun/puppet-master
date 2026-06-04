@@ -1,0 +1,6 @@
+{
+    "scripts": {
+        "wally": "wally install && rojo sourcemap dev.project.json --output sourcemap.json",
+        "serve": "rojo serve dev.project.json"
+    }
+}
