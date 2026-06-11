@@ -29,6 +29,18 @@ export type SpringSettings = {
 	fadeIn: number?,
 	strength: number?,
 }
+export type OffsetSettings = {
+	-- RelativeTo: "World" | "Master" | "Local",
+	-- AvoidClipping: boolean,
+	Priority: number,
+	OffsetFocusOrientation: boolean,
+}
+
+export type OffsetObject = {
+	Instance: CFrameValue,
+	Settings: OffsetSettings,
+}
+
 export type Settings = {
 	style: StyleModules | any?,
 	lerpSpeed: number?,
@@ -50,8 +62,8 @@ export type PuppetMaster = typeof(setmetatable(
 		master: Instance,
 		puppet: Instance,
 
-		offsetObjects: { { Obj: Vector3Value, Priority: number } },
-		offsetTweenConnections: { [Vector3Value]: RBXScriptConnection },
+		offsetObjects: { OffsetObject },
+		offsetTweenConnections: { [CFrameValue]: RBXScriptConnection },
 
 		lookVectorClamping: Vector2,
 
@@ -117,7 +129,7 @@ export type PuppetMaster = typeof(setmetatable(
 	PuppetMaster:AddFocusTarget(workspace:WaitForChild("FocusTarget"))
 	
 	-- puppet will be offset by 4 studs above the master, function retruns Vector3Value
-	local idleOffset = testPuppet:AddOffset(Vector3.yAxis * 4, 1, false)
+	local idleOffset :: CFrameValue = testPuppet:AddOffset(Vector3.yAxis * 4, 1, false)
 
 	PuppetMaster:Play(RunService.Heartbeat)
 	```
@@ -182,10 +194,15 @@ end
 function PuppetMaster.Runtime(self: PuppetMaster)
 	local focusTarget = self.focusTarget
 
-	local masterCFrame = #self.offsetObjects > 0
-			and self:_applyAllOffsets(self:_getInstanceCFrame(self.master) :: CFrame)
-		or self:_getInstanceCFrame(self.master) :: CFrame
+	local offsetMasterCFrame: CFrame?
+	local afterFocusRotationOffset: CFrame = CFrame.identity
 
+	if #self.offsetObjects > 0 then
+		offsetMasterCFrame, afterFocusRotationOffset =
+			self:_applyAllOffsets(self:_getInstanceCFrame(self.master) :: CFrame)
+	end
+
+	local masterCFrame = offsetMasterCFrame or self:_getInstanceCFrame(self.master) :: CFrame
 	local puppetCFrame = self:_getInstanceCFrame(self.puppet) :: CFrame
 	local focusTargetCFrame = focusTarget and self:_getInstanceCFrame(focusTarget) :: CFrame or nil
 
@@ -206,8 +223,14 @@ function PuppetMaster.Runtime(self: PuppetMaster)
 		local styledPos = styleMod(self, masterCFrame, puppetCFrame, lerpSpeed, distance, delta)
 
 		local desiredLook = focusTargetCFrame and (focusTargetCFrame.Position - styledPos).Unit or nil
-		local puppetRotation =
-			getPuppetRotation(masterCFrame, puppetCFrame, desiredLook, self.lookVectorClamping, turnSpeed)
+		local puppetRotation = getPuppetRotation(
+			masterCFrame,
+			puppetCFrame,
+			desiredLook,
+			self.lookVectorClamping,
+			turnSpeed,
+			afterFocusRotationOffset
+		)
 
 		local finalCFrame = CFrame.new(styledPos) * puppetRotation
 		self:_setInstanceCFrame(self.puppet, finalCFrame)
@@ -251,24 +274,27 @@ end
 
 function PuppetMaster.AddOffset(
 	self: PuppetMaster,
-	offset: Vector3,
-	priority: number,
+	offset: CFrame,
+	offsetSettings: OffsetSettings?,
 	clearOffsets: boolean
-): Vector3Value?
+): OffsetObject?
 	if not offset then
 		return
 	end
 
-	local newObj = Instance.new("Vector3Value")
+	offsetSettings = self:_fixOffsetSettings(offsetSettings)
+
+	local newObj = Instance.new("CFrameValue")
 	newObj.Value = offset
 
 	if clearOffsets then
 		self:ClearOffsets()
 	end
 
-	table.insert(self.offsetObjects, { Obj = newObj, Priority = priority })
+	local offsetObject = { Instance = newObj, Settings = offsetSettings :: OffsetSettings }
+	table.insert(self.offsetObjects, offsetObject)
 
-	return newObj
+	return offsetObject
 end
 
 function PuppetMaster.ClearOffsets(self: PuppetMaster)
@@ -277,7 +303,7 @@ function PuppetMaster.ClearOffsets(self: PuppetMaster)
 	end
 
 	for _, data in self.offsetObjects do
-		data.Obj:Destroy()
+		data.Instance:Destroy()
 	end
 
 	table.clear(self.offsetObjects)
@@ -285,8 +311,8 @@ end
 
 function PuppetMaster.TweenOffset(
 	self: PuppetMaster,
-	offset: Vector3,
-	priority: number,
+	offset: CFrame,
+	offsetSettings: OffsetSettings?,
 	clearOffsets: boolean,
 	tweenInfo: TweenInfo
 )
@@ -294,16 +320,17 @@ function PuppetMaster.TweenOffset(
 		return
 	end
 
+	offsetSettings = self:_fixOffsetSettings(offsetSettings)
 	tweenInfo = tweenInfo or TweenInfo.new(0.5, Enum.EasingStyle.Quad, Enum.EasingDirection.InOut, 0, true)
 
-	local newObj = Instance.new("Vector3Value")
-	newObj.Value = Vector3.zero
+	local newObj = Instance.new("CFrameValue")
+	newObj.Value = CFrame.new()
 
 	if clearOffsets then
 		self:ClearOffsets()
 	end
 
-	local tbl = { Obj = newObj, Priority = priority }
+	local tbl = { Instance = newObj, Settings = offsetSettings :: OffsetSettings }
 	table.insert(self.offsetObjects, tbl)
 
 	local tween = TweenService:Create(newObj, tweenInfo, {
@@ -324,7 +351,7 @@ function PuppetMaster.Destroy(self: PuppetMaster)
 	self:RemoveFocusTarget()
 
 	for _, data in self.offsetObjects do
-		local obj = data.Obj
+		local obj = data.Instance
 		if not obj or not obj.Parent then
 			continue
 		end
@@ -340,22 +367,51 @@ function PuppetMaster.Destroy(self: PuppetMaster)
 	setmetatable(self :: any, nil)
 end
 
-function PuppetMaster._applyAllOffsets(self: PuppetMaster, cframe: CFrame): CFrame?
-	if not cframe then
-		return
+-- function PuppetMaster._toggleOffsetFollowingMasterDirection(self: PuppetMaster, offsetData: {}) end
+
+function PuppetMaster._fixOffsetSettings(self: PuppetMaster, offsetSettings: OffsetSettings?): OffsetSettings
+	local Settings: OffsetSettings = offsetSettings or {} :: OffsetSettings
+
+	Settings.Priority = Settings.Priority or 1
+	-- Settings.RelativeTo = Settings.RelativeTo or "World"
+
+	if Settings.OffsetFocusOrientation == nil then
+		Settings.OffsetFocusOrientation = true
 	end
 
-	local newCFrame = cframe
+	-- if Settings.AvoidClipping == nil then
+	-- 	Settings.AvoidClipping = false
+	-- end
+
+	return Settings
+end
+
+function PuppetMaster._applyAllOffsets(self: PuppetMaster, cframe: CFrame): (CFrame?, CFrame)
+	if not cframe then
+		return nil, CFrame.identity
+	end
+
+	local finalPos = cframe.Position
+	local preFocusRot = cframe.Rotation
+	local afterFocusRot = CFrame.identity
 
 	table.sort(self.offsetObjects, function(a, b)
-		return a.Priority < b.Priority
+		return a.Settings.Priority < b.Settings.Priority
 	end)
 
-	for _, offsetData: { Obj: Vector3Value, Priority: number } in self.offsetObjects do
-		newCFrame = CFrame.new(offsetData.Obj.Value + newCFrame.Position) * newCFrame.Rotation
+	for _, offsetObject: OffsetObject in self.offsetObjects do
+		local offset = offsetObject.Instance.Value
+
+		finalPos += offset.Position
+		if offsetObject.Settings.OffsetFocusOrientation then
+			afterFocusRot *= offset.Rotation
+		else
+			preFocusRot *= offset.Rotation
+		end
 	end
 
-	return newCFrame
+	local finalMasterCFrame = CFrame.new(finalPos) * preFocusRot
+	return finalMasterCFrame, afterFocusRot
 end
 
 local function checkInstanceError(isModel: boolean, isBasePart: boolean, instance: Instance)
