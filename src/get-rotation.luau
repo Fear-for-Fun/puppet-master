@@ -3,11 +3,14 @@ return function(
 	puppetCFrame: CFrame,
 	desiredLook: Vector3?,
 	lookVectorClamping: Vector2,
-	turnSpeed: number
+	turnSpeed: number,
+	afterFocusRotationOffset: CFrame
 ): CFrame
 	if not desiredLook then
 		return puppetCFrame.Rotation:Lerp(masterCFrame.Rotation, turnSpeed)
 	end
+
+	afterFocusRotationOffset = afterFocusRotationOffset or CFrame.identity
 
 	local masterLook = masterCFrame.LookVector
 
@@ -30,7 +33,7 @@ return function(
 		-math.cos(clampedYaw) * math.cos(clampedPitch)
 	)
 
-	local targetRotation = CFrame.lookAt(Vector3.zero, clampedLook).Rotation
+	local targetRotation = CFrame.lookAt(Vector3.zero, clampedLook).Rotation * afterFocusRotationOffset.Rotation
 
 	return puppetCFrame.Rotation:Lerp(targetRotation, turnSpeed)
 end
