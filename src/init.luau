@@ -30,7 +30,7 @@ export type SpringSettings = {
 	strength: number?,
 }
 export type OffsetSettings = {
-	-- RelativeTo: "World" | "Master" | "Local",
+	RelativeTo: "World" | "Master" | "Focus",
 	AvoidClipping: boolean,
 	ClippingOffset: number,
 	Priority: number,
@@ -377,7 +377,7 @@ function PuppetMaster._fixOffsetSettings(self: PuppetMaster, offsetSettings: Off
 	Settings.Priority = Settings.Priority or 1
 	Settings.ClippingParams = Settings.ClippingParams or nil
 	Settings.ClippingOffset = Settings.ClippingOffset or 0
-	-- Settings.RelativeTo = Settings.RelativeTo or "World"
+	Settings.RelativeTo = Settings.RelativeTo or "World"
 
 	if Settings.OffsetFocusOrientation == nil then
 		Settings.OffsetFocusOrientation = true
@@ -406,12 +406,12 @@ function PuppetMaster._applyAllOffsets(self: PuppetMaster, cframe: CFrame): (CFr
 	for _, offsetObject: OffsetObject in self.offsetObjects do
 		local offset = offsetObject.Instance.Value
 		local offsetPosition = offset.Position
+		local desiredPos = cframe.Position + offset.Position
+		local dir = desiredPos - cframe.Position
+		local mag = dir.Magnitude
+		local unit = dir.Unit
 
 		if offsetObject.Settings.AvoidClipping then
-			local desiredPos = cframe.Position + offset.Position
-			local dir = desiredPos - cframe.Position
-			local unit = dir.Unit
-			local mag = dir.Magnitude
 			local rayDirection = unit * (mag + offsetObject.Settings.ClippingOffset)
 
 			local rayResult = self:_raycast(
@@ -427,6 +427,17 @@ function PuppetMaster._applyAllOffsets(self: PuppetMaster, cframe: CFrame): (CFr
 
 				offsetPosition = unit * safeDistance
 			end
+		end
+
+		local Relativity = offsetObject.Settings.RelativeTo
+
+		if Relativity == "Master" then
+			offsetPosition *= cframe.LookVector
+		elseif Relativity == "Focus" then
+			local directionToFocusTarget = self.focusTarget
+					and (cframe.Position - (self:_getInstanceCFrame(self.focusTarget) :: CFrame).Position).Unit :: Vector3
+				or Vector3.one
+			offsetPosition = self.focusTarget and offsetPosition * directionToFocusTarget or offsetPosition
 		end
 
 		finalPos += offsetPosition
