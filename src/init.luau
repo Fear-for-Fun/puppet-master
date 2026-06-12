@@ -31,9 +31,11 @@ export type SpringSettings = {
 }
 export type OffsetSettings = {
 	-- RelativeTo: "World" | "Master" | "Local",
-	-- AvoidClipping: boolean,
+	AvoidClipping: boolean,
+	ClippingOffset: number,
 	Priority: number,
 	OffsetFocusOrientation: boolean,
+	ClippingParams: RaycastParams?,
 }
 
 export type OffsetObject = {
@@ -276,7 +278,7 @@ function PuppetMaster.AddOffset(
 	self: PuppetMaster,
 	offset: CFrame,
 	offsetSettings: OffsetSettings?,
-	clearOffsets: boolean
+	clearOffsets: boolean?
 ): OffsetObject?
 	if not offset then
 		return
@@ -373,15 +375,17 @@ function PuppetMaster._fixOffsetSettings(self: PuppetMaster, offsetSettings: Off
 	local Settings: OffsetSettings = offsetSettings or {} :: OffsetSettings
 
 	Settings.Priority = Settings.Priority or 1
+	Settings.ClippingParams = Settings.ClippingParams or nil
+	Settings.ClippingOffset = Settings.ClippingOffset or 0
 	-- Settings.RelativeTo = Settings.RelativeTo or "World"
 
 	if Settings.OffsetFocusOrientation == nil then
 		Settings.OffsetFocusOrientation = true
 	end
 
-	-- if Settings.AvoidClipping == nil then
-	-- 	Settings.AvoidClipping = false
-	-- end
+	if Settings.AvoidClipping == nil then
+		Settings.AvoidClipping = false
+	end
 
 	return Settings
 end
@@ -401,8 +405,32 @@ function PuppetMaster._applyAllOffsets(self: PuppetMaster, cframe: CFrame): (CFr
 
 	for _, offsetObject: OffsetObject in self.offsetObjects do
 		local offset = offsetObject.Instance.Value
+		local offsetPosition = offset.Position
 
-		finalPos += offset.Position
+		if offsetObject.Settings.AvoidClipping then
+			local desiredPos = cframe.Position + offset.Position
+			local dir = desiredPos - cframe.Position
+			local unit = dir.Unit
+			local mag = dir.Magnitude
+			local rayDirection = unit * (mag + offsetObject.Settings.ClippingOffset)
+
+			local rayResult = self:_raycast(
+				cframe.Position,
+				rayDirection,
+				offsetObject.Settings.ClippingParams,
+				{ self.master, self.puppet }
+			)
+
+			if rayResult then
+				local hitDistance = rayResult.Distance
+				local safeDistance = math.max(hitDistance - offsetObject.Settings.ClippingOffset, 0)
+
+				offsetPosition = unit * safeDistance
+			end
+		end
+
+		finalPos += offsetPosition
+
 		if offsetObject.Settings.OffsetFocusOrientation then
 			afterFocusRot *= offset.Rotation
 		else
@@ -419,6 +447,14 @@ local function checkInstanceError(isModel: boolean, isBasePart: boolean, instanc
 		warn(instance)
 		error(`Given instance: '{instance}' cannot read a position`, 2)
 	end
+end
+
+function PuppetMaster._raycast(_: PuppetMaster, origin: Vector3, direction: Vector3, rayParams: RaycastParams?, ...)
+	local RaycastParams = rayParams or RaycastParams.new()
+	RaycastParams.FilterDescendantsInstances = ...
+
+	local result = workspace:Raycast(origin, direction, RaycastParams)
+	return result
 end
 
 function PuppetMaster._getInstancePosition(_: PuppetMaster, instance: any): Vector3?
