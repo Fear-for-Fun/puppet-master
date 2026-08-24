@@ -270,8 +270,10 @@ function PuppetMaster.AddFocusTarget(self: PuppetMaster, target: BasePart | Mode
 end
 
 function PuppetMaster.RemoveFocusTarget(self: PuppetMaster)
-	self.focusTargetDestroyConnection:Disconnect()
-	self.focusTarget = nil
+	if self.focusTargetDestroyConnection then
+		self.focusTargetDestroyConnection:Disconnect()
+		self.focusTarget = nil
+	end
 end
 
 function PuppetMaster.AddOffset(
