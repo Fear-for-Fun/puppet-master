@@ -11,7 +11,16 @@ PuppetMaster.StyleModules = {
 	Spring = { name = "Spring", module = require(stylesFolder.spring) },
 }
 
+PuppetMaster.CrowdSettings = {
+	startCount = 35,
+	fullCount = 100,
+	minScale = 0.05,
+} :: CrowdSettings
+
+PuppetMaster.PerformanceEnabled = true
+
 local BASE_FPS = 30
+local totalPlaying = 0
 
 export type StyleModules = { name: string, module: ModuleScript }
 
@@ -25,6 +34,21 @@ export type StyleModuleSettings = (
 	distance: number,
 	delta: Vector3?
 ) -> Vector3
+
+export type PerformanceSettings = {
+	enabled: boolean?, -- false = update every step, ignoring all throttling (default true)
+	maxFrameRate: number?,
+	minFrameRate: number?,
+	nearDistance: number?,
+	farDistance: number?,
+	falloffExponent: number?,
+}
+
+export type CrowdSettings = {
+	startCount: number, -- puppet count where scaling begins
+	fullCount: number, -- puppet count where scaling reaches minScale
+	minScale: number, -- rate multiplier at fullCount (0.25 = quarter speed)
+}
 
 export type SpringSettings = {
 	speed: number?,
@@ -53,6 +77,7 @@ export type Settings = {
 	snapThreshold: number?,
 
 	springSettings: SpringSettings?,
+	performance: PerformanceSettings?,
 
 	debug: {
 		debugTrails: boolean?,
@@ -74,7 +99,11 @@ export type PuppetMaster = typeof(setmetatable(
 		activeSignal: RBXScriptConnection?,
 		lastFrameUpdate: number,
 		desiredFrameRateLimit: number,
-		_frameRateLimit: number,
+		minFrameRate: number,
+		nearDistance: number,
+		farDistance: number,
+		falloffExponent: number,
+		performanceEnabled: boolean,
 
 		focusTarget: Instance?,
 
@@ -151,18 +180,48 @@ type Group = {
 }
 
 local groups: { [string]: Group } = {}
+local function getCrowdScale(): number
+	local crowd = PuppetMaster.CrowdSettings
+	if totalPlaying <= crowd.startCount then
+		return 1
+	end
+	local range = math.max(crowd.fullCount - crowd.startCount, 1)
+	local t = math.clamp((totalPlaying - crowd.startCount) / range, 0, 1)
+	return 1 - t * (1 - crowd.minScale)
+end
+
+local function getTargetFrameRate(pm: PuppetMaster, distance: number, crowdScale: number): number
+	local maxFps = pm.desiredFrameRateLimit or 30
+	local minFps = math.min(pm.minFrameRate, maxFps)
+
+	local range = math.max(pm.farDistance - pm.nearDistance, 0.001)
+	local alpha = math.clamp((distance - pm.nearDistance) / range, 0, 1) ^ pm.falloffExponent
+
+	local fps = (maxFps + (minFps - maxFps) * alpha) * crowdScale
+	return math.max(fps, minFps)
+end
 
 local function stepGroup(group: Group)
 	debug.profilebegin("PM_Step")
 	local now = os.clock()
 
-	for pm in group.puppets do
-		local maxLimit = pm.desiredFrameRateLimit or 30
-		local dist = (pm:_getInstancePosition(pm.puppet) - workspace.CurrentCamera.CFrame.Position).Magnitude
-		local limit = dist > 20 and math.floor(maxLimit / 6) or maxLimit
+	local globalEnabled = PuppetMaster.PerformanceEnabled
+	local camera = globalEnabled and workspace.CurrentCamera
+	local cameraPosition = camera and camera.CFrame.Position
+	local crowdScale = globalEnabled and getCrowdScale() or 1
 
-		if limit and limit > 0 and now - (pm.lastFrameUpdate or 0) < 1 / limit then
-			continue
+	for pm in group.puppets do
+		if globalEnabled and pm.performanceEnabled then
+			local distance = 0
+			if cameraPosition then
+				local pos = pm:_getInstancePosition(pm.puppet) :: Vector3
+				distance = (pos - cameraPosition).Magnitude
+			end
+
+			local fps = getTargetFrameRate(pm, distance, crowdScale)
+			if now - pm.lastFrameUpdate < 1 / fps then
+				continue
+			end
 		end
 
 		debug.profilebegin("PM_Update")
@@ -172,7 +231,6 @@ local function stepGroup(group: Group)
 
 	debug.profileend()
 end
-
 function PuppetMaster.new(master: Instance, puppet: Instance, settings: Settings?): PuppetMaster
 	local self = setmetatable({}, PuppetMaster) :: PuppetMaster
 
@@ -194,8 +252,16 @@ function PuppetMaster.new(master: Instance, puppet: Instance, settings: Settings
 	self.springFadeIn = springSettings and springSettings.fadeIn or 4
 	self.springStrength = springSettings and springSettings.strength or 2
 
-	self.desiredFrameRateLimit = 30
-	self.lastFrameUpdate = os.clock()
+	local perf = settings and settings.performance or {} :: PerformanceSettings
+	self.desiredFrameRateLimit = perf.maxFrameRate or 30
+	self.minFrameRate = perf.minFrameRate or 5
+	self.nearDistance = perf.nearDistance or 20
+	self.farDistance = perf.farDistance or 150
+	self.falloffExponent = perf.falloffExponent or 5
+	self.performanceEnabled = perf.enabled ~= false
+
+	-- stagger so puppets at low rates don't all update on the same frame
+	self.lastFrameUpdate = os.clock() - math.random() / math.max(self.minFrameRate, 1)
 
 	self.debug = settings and (settings.debug :: any) or nil
 
@@ -245,6 +311,7 @@ function PuppetMaster.Play(self: PuppetMaster, runtimeSignal: RBXScriptSignal?)
 
 	group.puppets[self] = true
 	group.count += 1
+	totalPlaying += 1
 	self.activeSignal = signal
 end
 
@@ -313,6 +380,7 @@ function PuppetMaster.Pause(self: PuppetMaster)
 			if group.puppets[self] then
 				group.puppets[self] = nil
 				group.count -= 1
+				totalPlaying -= 1
 			end
 
 			-- last puppet left, so the shared connection is no longer needed
@@ -336,6 +404,13 @@ function PuppetMaster.Pause(self: PuppetMaster)
 			inst:Destroy()
 		end
 	end
+end
+
+function PuppetMaster.SetCrowdSettings(settings: { startCount: number?, fullCount: number?, minScale: number? })
+	local crowd = PuppetMaster.CrowdSettings
+	crowd.startCount = settings.startCount or crowd.startCount
+	crowd.fullCount = settings.fullCount or crowd.fullCount
+	crowd.minScale = settings.minScale or crowd.minScale
 end
 
 function PuppetMaster.AddFocusTarget(self: PuppetMaster, target: BasePart | Model)
