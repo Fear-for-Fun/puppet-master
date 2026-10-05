@@ -12,13 +12,18 @@
                     "$path": "src"
                 }
             },
-            "client": {
-                "$className": "Folder",
-                "$path": "testing/client"
-            },
             "Assets": {
                 "$ignoreUnknownInstances": true,
                 "$className": "Folder"
+            }
+        },
+        "StarterPlayer": {
+            "$className": "StarterPlayer",
+            "StarterPlayerScripts": {
+                "$className": "StarterPlayerScripts",
+                "client": {
+                    "$path": "testing/client"
+                }
             }
         },
         "ServerScriptService": {
