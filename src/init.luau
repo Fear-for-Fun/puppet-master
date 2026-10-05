@@ -15,6 +15,7 @@ PuppetMaster.CrowdSettings = {
 	startCount = 35,
 	fullCount = 100,
 	minScale = 0.05,
+	countCulled = false,
 } :: CrowdSettings
 
 PuppetMaster.PerformanceEnabled = true
@@ -36,18 +37,24 @@ export type StyleModuleSettings = (
 ) -> Vector3
 
 export type PerformanceSettings = {
-	enabled: boolean?, -- false = update every step, ignoring all throttling (default true)
-	maxFrameRate: number?,
-	minFrameRate: number?,
-	nearDistance: number?,
-	farDistance: number?,
-	falloffExponent: number?,
+	enabled: boolean?, -- false = update every step, ignoring all throttling and culling (default true)
+	maxFrameRate: number?, -- fps when within nearDistance (default 30)
+	minFrameRate: number?, -- absolute floor, used when far away or in a big crowd (default 5)
+	nearDistance: number?, -- inside this distance the puppet updates at maxFrameRate (default 20)
+	farDistance: number?, -- at/after this distance the puppet updates at minFrameRate (default 150)
+	falloffExponent: number?, -- 1 = linear falloff, >1 stays fast longer, <1 drops faster (default 5)
+
+	cullOffscreen: boolean?, -- pause updates while neither puppet nor master is on screen (default true)
+	cullMargin: number?, -- extra viewport padding as a fraction of screen size (default 0.15)
+	hiddenFrameRate: number?, -- update rate while culled, 0 = fully paused (default 0)
+	cullCheckInterval: number?, -- seconds between visibility checks per puppet (default 0.1)
 }
 
 export type CrowdSettings = {
 	startCount: number, -- puppet count where scaling begins
 	fullCount: number, -- puppet count where scaling reaches minScale
 	minScale: number, -- rate multiplier at fullCount (0.25 = quarter speed)
+	countCulled: boolean?, -- true = culled puppets count toward the crowd size too (default false)
 }
 
 export type SpringSettings = {
@@ -96,14 +103,22 @@ export type PuppetMaster = typeof(setmetatable(
 
 		lookVectorClamping: Vector2,
 
-		activeSignal: RBXScriptConnection?,
+		activeSignal: RBXScriptSignal?,
 		lastFrameUpdate: number,
+
+		-- // performance
 		desiredFrameRateLimit: number,
 		minFrameRate: number,
 		nearDistance: number,
 		farDistance: number,
 		falloffExponent: number,
 		performanceEnabled: boolean,
+		cullOffscreen: boolean,
+		cullMargin: number,
+		hiddenFrameRate: number,
+		cullCheckInterval: number,
+		visible: boolean,
+		nextVisibilityCheck: number,
 
 		focusTarget: Instance?,
 
@@ -126,13 +141,13 @@ export type PuppetMaster = typeof(setmetatable(
 
 		runTimeConnection: RBXScriptConnection,
 		destroyConnections: { RBXScriptConnection },
-		focusTargetDestroyConnection: RBXScriptConnection,
+		focusTargetDestroyConnection: RBXScriptConnection?,
 	},
 	PuppetMaster
 ))
 
 --[=[
-	```lua
+```lua
 	local PuppetMaster = PuppetMaster.new(masterPart, puppetPart, {
 		style = PuppetMaster.StyleModules.Linear, -- what style the puppet follows the master in (use PuppetMaster.StyleModules in the settings)
 		turnSpeed = 20, -- gets / 100 and used as the alpha during lookVector interpolation
@@ -158,10 +173,27 @@ export type PuppetMaster = typeof(setmetatable(
 			strength = 1, -- maximum vertex
 		},
 
+		performance = {
+			enabled = true,
+			maxFrameRate = 30,
+			minFrameRate = 5,
+			nearDistance = 20,
+			farDistance = 150,
+			falloffExponent = 5,
+			cullOffscreen = true,
+			cullMargin = 0.15,
+			-- framerate for an object that is culled
+			hiddenFrameRate = 0,
+			cullCheckInterval = 0.1,
+		},
+
 		debug = {
 			debugTrails = false,
 		},
 	})
+
+	-- global crowd scaling (counts visible puppets unless countCulled = false)
+	PuppetMaster.SetCrowdSettings({ startCount = 35, fullCount = 100, minScale = 0.05 })
 
 	-- puppet will look at this instance, when nil puppet follows the masters lookDir
 	PuppetMaster:AddFocusTarget(workspace:WaitForChild("FocusTarget"))
@@ -170,23 +202,35 @@ export type PuppetMaster = typeof(setmetatable(
 	local idleOffset :: CFrameValue = testPuppet:AddOffset(Vector3.yAxis * 4, 1, false)
 
 	PuppetMaster:Play(RunService.Heartbeat)
-	```
+```
 ]=]
 
 type Group = {
 	connection: RBXScriptConnection,
 	puppets: { [PuppetMaster]: true },
 	count: number,
+	visibleCount: number,
 }
 
 local groups: { [string]: Group } = {}
+
 local function getCrowdScale(): number
 	local crowd = PuppetMaster.CrowdSettings
-	if totalPlaying <= crowd.startCount then
+
+	local count = totalPlaying
+	if not crowd.countCulled then
+		count = 0
+		for _, group in groups do
+			count += group.visibleCount
+		end
+	end
+
+	if count <= crowd.startCount then
 		return 1
 	end
+
 	local range = math.max(crowd.fullCount - crowd.startCount, 1)
-	local t = math.clamp((totalPlaying - crowd.startCount) / range, 0, 1)
+	local t = math.clamp((count - crowd.startCount) / range, 0, 1)
 	return 1 - t * (1 - crowd.minScale)
 end
 
@@ -201,27 +245,82 @@ local function getTargetFrameRate(pm: PuppetMaster, distance: number, crowdScale
 	return math.max(fps, minFps)
 end
 
+local function isOnScreen(camera: Camera, position: Vector3, margin: number): boolean
+	local viewport = camera.ViewportSize
+	local screenPos = camera:WorldToViewportPoint(position)
+	local marginX, marginY = viewport.X * margin, viewport.Y * margin
+
+	return screenPos.Z > 0
+		and screenPos.X > -marginX
+		and screenPos.X < viewport.X + marginX
+		and screenPos.Y > -marginY
+		and screenPos.Y < viewport.Y + marginY
+end
+
+local function isVisibleToCamera(pm: PuppetMaster, camera: Camera, puppetPosition: Vector3): boolean
+	if isOnScreen(camera, puppetPosition, pm.cullMargin) then
+		return true
+	end
+
+	local masterPosition = pm:_getInstancePosition(pm.master) :: Vector3
+	return isOnScreen(camera, masterPosition, pm.cullMargin)
+end
+
 local function stepGroup(group: Group)
 	debug.profilebegin("PM_Step")
 	local now = os.clock()
 
 	local globalEnabled = PuppetMaster.PerformanceEnabled
-	local camera = globalEnabled and workspace.CurrentCamera
+	local camera = if globalEnabled then workspace.CurrentCamera else nil
 	local cameraPosition = camera and camera.CFrame.Position
 	local crowdScale = globalEnabled and getCrowdScale() or 1
 
+	local visibleTally = 0
+
 	for pm in group.puppets do
 		if globalEnabled and pm.performanceEnabled then
-			local distance = 0
-			if cameraPosition then
-				local pos = pm:_getInstancePosition(pm.puppet) :: Vector3
-				distance = (pos - cameraPosition).Magnitude
+			local puppetPosition: Vector3? = nil
+
+			if not pm.cullOffscreen then
+				pm.visible = true
+			elseif camera and now >= pm.nextVisibilityCheck then
+				debug.profilebegin("PM_Cull")
+
+				pm.nextVisibilityCheck = now + pm.cullCheckInterval * (0.8 + math.random() * 0.4)
+
+				puppetPosition = pm:_getInstancePosition(pm.puppet) :: Vector3
+				local nowVisible = isVisibleToCamera(pm, camera, puppetPosition)
+
+				if nowVisible and not pm.visible then
+					pm.lastFrameUpdate = now - math.random() / math.max(pm.minFrameRate, 1)
+				end
+
+				pm.visible = nowVisible
+				debug.profileend()
 			end
 
-			local fps = getTargetFrameRate(pm, distance, crowdScale)
-			if now - pm.lastFrameUpdate < 1 / fps then
-				continue
+			if pm.visible then
+				visibleTally += 1
+
+				local distance = 0
+				if cameraPosition then
+					puppetPosition = puppetPosition or (pm:_getInstancePosition(pm.puppet) :: Vector3)
+					distance = (puppetPosition - cameraPosition).Magnitude
+				end
+
+				local fps = getTargetFrameRate(pm, distance, crowdScale)
+				if now - pm.lastFrameUpdate < 1 / fps then
+					continue
+				end
+			else
+				local hiddenFps = pm.hiddenFrameRate
+				if hiddenFps <= 0 or now - pm.lastFrameUpdate < 1 / hiddenFps then
+					continue
+				end
 			end
+		else
+			pm.visible = true
+			visibleTally += 1
 		end
 
 		debug.profilebegin("PM_Update")
@@ -229,8 +328,38 @@ local function stepGroup(group: Group)
 		debug.profileend()
 	end
 
+	group.visibleCount = visibleTally
+
 	debug.profileend()
 end
+
+function PuppetMaster.SetCrowdSettings(settings: {
+	startCount: number?,
+	fullCount: number?,
+	minScale: number?,
+	countCulled: boolean?,
+})
+	local crowd = PuppetMaster.CrowdSettings
+	crowd.startCount = settings.startCount or crowd.startCount
+	crowd.fullCount = settings.fullCount or crowd.fullCount
+	crowd.minScale = settings.minScale or crowd.minScale
+	if settings.countCulled ~= nil then
+		crowd.countCulled = settings.countCulled
+	end
+end
+
+function PuppetMaster.GetStats()
+	local visible = 0
+	for _, group in groups do
+		visible += group.visibleCount
+	end
+	return {
+		playing = totalPlaying,
+		visible = visible,
+		crowdScale = getCrowdScale(),
+	}
+end
+
 function PuppetMaster.new(master: Instance, puppet: Instance, settings: Settings?): PuppetMaster
 	local self = setmetatable({}, PuppetMaster) :: PuppetMaster
 
@@ -259,8 +388,12 @@ function PuppetMaster.new(master: Instance, puppet: Instance, settings: Settings
 	self.farDistance = perf.farDistance or 150
 	self.falloffExponent = perf.falloffExponent or 5
 	self.performanceEnabled = perf.enabled ~= false
-
-	-- stagger so puppets at low rates don't all update on the same frame
+	self.cullOffscreen = perf.cullOffscreen ~= false
+	self.cullMargin = perf.cullMargin or 0.15
+	self.hiddenFrameRate = perf.hiddenFrameRate or 0
+	self.cullCheckInterval = perf.cullCheckInterval or 0.1
+	self.visible = true
+	self.nextVisibilityCheck = os.clock() + math.random() * self.cullCheckInterval
 	self.lastFrameUpdate = os.clock() - math.random() / math.max(self.minFrameRate, 1)
 
 	self.debug = settings and (settings.debug :: any) or nil
@@ -293,7 +426,7 @@ end
 
 function PuppetMaster.Play(self: PuppetMaster, runtimeSignal: RBXScriptSignal?)
 	if self.activeSignal then
-		return -- already playing
+		return
 	end
 
 	local signal = runtimeSignal or RunService.PostSimulation
@@ -301,7 +434,7 @@ function PuppetMaster.Play(self: PuppetMaster, runtimeSignal: RBXScriptSignal?)
 
 	local group = groups[key]
 	if not group then
-		local newGroup = { puppets = {}, count = 0 } :: any
+		local newGroup = { puppets = {}, count = 0, visibleCount = 0 } :: any
 		newGroup.connection = signal:Connect(function()
 			stepGroup(newGroup)
 		end)
@@ -312,6 +445,9 @@ function PuppetMaster.Play(self: PuppetMaster, runtimeSignal: RBXScriptSignal?)
 	group.puppets[self] = true
 	group.count += 1
 	totalPlaying += 1
+
+	self.visible = true
+	self.nextVisibilityCheck = os.clock() + math.random() * self.cullCheckInterval
 	self.activeSignal = signal
 end
 
@@ -383,7 +519,6 @@ function PuppetMaster.Pause(self: PuppetMaster)
 				totalPlaying -= 1
 			end
 
-			-- last puppet left, so the shared connection is no longer needed
 			if group.count <= 0 then
 				group.connection:Disconnect()
 				groups[key] = nil
@@ -406,13 +541,6 @@ function PuppetMaster.Pause(self: PuppetMaster)
 	end
 end
 
-function PuppetMaster.SetCrowdSettings(settings: { startCount: number?, fullCount: number?, minScale: number? })
-	local crowd = PuppetMaster.CrowdSettings
-	crowd.startCount = settings.startCount or crowd.startCount
-	crowd.fullCount = settings.fullCount or crowd.fullCount
-	crowd.minScale = settings.minScale or crowd.minScale
-end
-
 function PuppetMaster.AddFocusTarget(self: PuppetMaster, target: BasePart | Model)
 	self.focusTarget = target
 
@@ -424,12 +552,11 @@ function PuppetMaster.AddFocusTarget(self: PuppetMaster, target: BasePart | Mode
 end
 
 function PuppetMaster.RemoveFocusTarget(self: PuppetMaster)
-	self.focusTargetDestroyConnection:Disconnect()
-	self.focusTarget = nil
 	if self.focusTargetDestroyConnection then
 		self.focusTargetDestroyConnection:Disconnect()
-		self.focusTarget = nil
+		self.focusTargetDestroyConnection = nil
 	end
+	self.focusTarget = nil
 end
 
 function PuppetMaster.AddOffset(
@@ -527,8 +654,6 @@ function PuppetMaster.Destroy(self: PuppetMaster)
 	setmetatable(self :: any, nil)
 end
 
--- Converts an alpha tuned for REFERENCE_FPS into one that gives the same
--- result over `dt` seconds, regardless of how many frames that took.
 function PuppetMaster._getframeIndependentAlpha(self: PuppetMaster, alpha: number, dt: number): number
 	alpha = math.clamp(alpha, 0, 1)
 	if alpha >= 1 then
